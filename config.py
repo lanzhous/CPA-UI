@@ -83,14 +83,19 @@ GEMINI_CLI_USER_AGENT = "google-api-nodejs-client/9.15.1"
 
 # OAuth 配置 (用于刷新 Antigravity token 以获取实时配额)
 # 注意：只有 Antigravity 支持实时配额查询，其他服务使用静态模型列表
-ANTIGRAVITY_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-ANTIGRAVITY_CLIENT_SECRET = "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"
+# 从环境变量读取，避免将密钥提交到公开仓库；未设置时 Antigravity 配额刷新不可用
+ANTIGRAVITY_CLIENT_ID = os.environ.get("CPA_ANTIGRAVITY_CLIENT_ID", "")
+ANTIGRAVITY_CLIENT_SECRET = os.environ.get("CPA_ANTIGRAVITY_CLIENT_SECRET", "")
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 # API Keys (从 config.yaml 读取，用于显示使用示例)
 API_KEYS = _project_config.get("api-keys", [])
 API_PORT = _port
 API_HOST = _host or "127.0.0.1"
+
+# 批量刷新配额时的并发数（环境变量 CPA_QUOTA_REFRESH_CONCURRENCY 或 config.yaml 的 quota-refresh-concurrency）
+_raw_concurrency = os.environ.get("CPA_QUOTA_REFRESH_CONCURRENCY") or _project_config.get("quota-refresh-concurrency") or 4
+QUOTA_REFRESH_CONCURRENCY = max(1, min(32, int(_raw_concurrency)))
 
 # 打印配置信息
 if __name__ == "__main__":

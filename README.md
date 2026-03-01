@@ -15,7 +15,7 @@ CLIProxyAPI 控制面板 - 服务管理与账户监控 Web 界面。
 - 显示会员等级（ULTRA/PRO/FREE）及账户状态（活跃 / 需要重新登录）
 - 显示每个模型的配额百分比及重置倒计时（Antigravity 实时配额）；其他类型显示静态支持的模型列表
 - 配额缓存持久化（重启后保留）
-- **刷新配额**：单个账户刷新 / 批量并行刷新所有账户（并行度 4）；刷新时会校验账号是否仍有效
+- **刷新配额**：单个账户刷新 / 批量并行刷新所有账户（并行度可配置，默认 4）；刷新时会校验账号是否仍有效
 - **Codex 鉴权**：刷新 Codex 账户时除 OAuth 刷新外，会请求 Codex Models API；若返回 401 则标记为「需要重新登录」，更准确
 - **筛选**：
   - **类型**：全部、Antigravity、Gemini、Claude、Codex、ULTRA、PRO
@@ -53,8 +53,37 @@ python app.py
 程序会自动从环境变量或父目录查找 `config.yaml` 读取配置：
 - `port` - CLIProxyAPI 端口
 - `auth-dir` - 认证文件目录
+- `quota-refresh-concurrency` - 批量刷新配额时的并发数（见下方说明）
 
-环境变量：
+### 如何配置批量刷新并发数
+
+点击「刷新所有配额」时，同时请求的账户数量由**并发数**控制（默认 4）。可按需调大以加快刷新，或调小以减轻对上游 API 的压力。
+
+**方式一：环境变量（推荐）**
+
+在启动 Dashboard 前设置：
+
+```bash
+# Linux / macOS
+export CPA_QUOTA_REFRESH_CONCURRENCY=8
+python app.py
+
+# 或使用启动脚本时
+CPA_QUOTA_REFRESH_CONCURRENCY=8 ./start.sh
+```
+
+**方式二：config.yaml**
+
+在 CLIProxyAPI 使用的 `config.yaml` 中增加（与 `port`、`auth-dir` 等同级）：
+
+```yaml
+quota-refresh-concurrency: 8
+```
+
+- 有效范围：**1–32**，超出会自动限制在此区间。
+- 修改后需**重启 Dashboard**（若用 config.yaml）或**刷新浏览器并重新进入账户页**，新的并发数才会生效。
+
+### 环境变量一览
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -66,6 +95,9 @@ python app.py
 | `CPA_MANAGEMENT_KEY` | Management API 密钥 | - |
 | `WEBUI_HOST` | WebUI 监听地址 | `127.0.0.1` |
 | `WEBUI_PORT` | WebUI 端口 | `5000` |
+| `CPA_QUOTA_REFRESH_CONCURRENCY` | 批量刷新配额并发数 | `4`（范围 1–32） |
+| `CPA_ANTIGRAVITY_CLIENT_ID` | Antigravity OAuth Client ID（用于配额刷新） | 未设置则 Antigravity 配额刷新不可用 |
+| `CPA_ANTIGRAVITY_CLIENT_SECRET` | Antigravity OAuth Client Secret | 同上 |
 
 ## 运行模式
 

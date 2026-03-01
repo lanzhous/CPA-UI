@@ -1881,7 +1881,7 @@
         let stateFilterRelogin = false;
         let autoRefreshEnabled = false;
         let autoRefreshInterval = null;
-        const CONCURRENCY = 4;
+        let quotaRefreshConcurrency = 4;  // 批量刷新配额并发数，由 /api/config 覆盖
 
         // ==================== Navigation ====================
         document.querySelectorAll('.nav-tab').forEach(tab => {
@@ -2128,8 +2128,19 @@
         }
 
         // ==================== Accounts ====================
+        let configLoaded = false;
         async function loadAccounts() {
             try {
+                if (!configLoaded) {
+                    try {
+                        const cfgResp = await fetch('/api/config');
+                        const cfg = await cfgResp.json();
+                        if (typeof cfg.quota_refresh_concurrency === 'number' && cfg.quota_refresh_concurrency > 0) {
+                            quotaRefreshConcurrency = Math.min(32, cfg.quota_refresh_concurrency);
+                        }
+                        configLoaded = true;
+                    } catch (_) {}
+                }
                 const resp = await fetch('/api/accounts');
                 const data = await resp.json();
                 accounts = data.accounts || [];
@@ -2533,7 +2544,7 @@
                 }
             });
 
-            await parallelLimit(tasks, CONCURRENCY);
+            await parallelLimit(tasks, quotaRefreshConcurrency);
 
             btn.disabled = false;
             progressInfo.classList.remove('active');

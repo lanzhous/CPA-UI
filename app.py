@@ -38,7 +38,8 @@ from config import (
     CPA_LOG_FILE,
     API_KEYS,
     API_PORT,
-    API_HOST
+    API_HOST,
+    QUOTA_REFRESH_CONCURRENCY,
 )
 from quota_service import get_quota_for_account, refresh_access_token, fetch_project_and_tier
 
@@ -457,7 +458,8 @@ def api_config():
         "management_api_url": MANAGEMENT_API_URL,
         "has_api_key": bool(MANAGEMENT_API_KEY),
         "auth_dir": AUTH_DIR,
-        "mode": "api" if MANAGEMENT_API_KEY else "local"
+        "mode": "api" if MANAGEMENT_API_KEY else "local",
+        "quota_refresh_concurrency": QUOTA_REFRESH_CONCURRENCY,
     })
 
 
