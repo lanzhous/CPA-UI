@@ -2,11 +2,13 @@
 配额服务 - 负责获取账户配额信息
 支持 Antigravity 和 Gemini CLI 类型账户
 新增：支持验证所有 OAuth 账户的 token 有效性
+Codex：刷新后额外请求 Codex Models API，401 视为失效（更准确）
 """
 import base64
 import json
 import requests
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from config import (
@@ -33,6 +35,8 @@ GEMINI_CLI_CLIENT_SECRET = "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"
 # Codex (OpenAI OAuth)
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_CLIENT_VERSION = "0.101.0"
+CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
 
 # Claude (Anthropic OAuth)
 CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
@@ -86,12 +90,12 @@ def antigravity_model_name_to_alias(model_name: str) -> Optional[str]:
     return ANTIGRAVITY_MODEL_NAME_TO_ALIAS.get(model_name, model_name)
 
 # 支持显示静态模型列表的 provider 类型（无法获取实时配额，但可以显示支持的模型）
-# Gemini CLI 也使用静态列表
-STATIC_MODELS_PROVIDERS = ["gemini", "codex", "claude", "qwen", "iflow", "aistudio", "vertex"]
+# Gemini CLI 也使用静态列表；与 CLIProxyAPI GetStaticModelDefinitionsByChannel 对齐
+STATIC_MODELS_PROVIDERS = ["gemini", "codex", "claude", "qwen", "iflow", "aistudio", "vertex", "kimi"]
 
 # 静态模型列表（从 CLIProxyAPI/internal/registry/model_definitions.go 提取）
 STATIC_MODEL_LISTS = {
-    # GetGeminiCLIModels() - 第 293-371 行
+    # GetGeminiCLIModels() - 与 model_definitions_static_data.go 对齐
     "gemini": [
         {"name": "gemini-2.5-pro", "display_name": "Gemini 2.5 Pro", "description": "Stable release (June 17th, 2025) of Gemini 2.5 Pro"},
         {"name": "gemini-2.5-flash", "display_name": "Gemini 2.5 Flash", "description": "Stable version of Gemini 2.5 Flash, up to 1M tokens"},
@@ -114,10 +118,12 @@ STATIC_MODEL_LISTS = {
         {"name": "gpt-5.3-codex", "display_name": "GPT 5.3 Codex", "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains."},
         {"name": "gpt-5.3-codex-spark", "display_name": "GPT 5.3 Codex Spark", "description": "Ultra-fast coding model."},
     ],
-    # GetClaudeModels() - 第 7-100 行
+    # GetClaudeModels() - 与 model_definitions_static_data.go 对齐
     "claude": [
         {"name": "claude-haiku-4-5-20251001", "display_name": "Claude 4.5 Haiku", "description": "Fast and efficient model"},
         {"name": "claude-sonnet-4-5-20250929", "display_name": "Claude 4.5 Sonnet", "description": "Balanced performance model"},
+        {"name": "claude-sonnet-4-6", "display_name": "Claude 4.6 Sonnet", "description": "Claude 4.6 Sonnet"},
+        {"name": "claude-opus-4-6", "display_name": "Claude 4.6 Opus", "description": "Premium model combining maximum intelligence with practical performance"},
         {"name": "claude-opus-4-5-20251101", "display_name": "Claude 4.5 Opus", "description": "Premium model combining maximum intelligence"},
         {"name": "claude-opus-4-1-20250805", "display_name": "Claude 4.1 Opus", "description": "Claude 4.1 Opus"},
         {"name": "claude-opus-4-20250514", "display_name": "Claude 4 Opus", "description": "Claude 4 Opus"},
@@ -161,7 +167,7 @@ STATIC_MODEL_LISTS = {
         {"name": "iflow-rome-30ba3b", "display_name": "iFlow-ROME", "description": "iFlow Rome 30BA3B model"},
         {"name": "kimi-k2.5", "display_name": "Kimi-K2.5", "description": "Moonshot Kimi K2.5"},
     ],
-    # GetAIStudioModels() - 第 375-529 行
+    # GetAIStudioModels() - 与 model_definitions_static_data.go 对齐
     "aistudio": [
         {"name": "gemini-2.5-pro", "display_name": "Gemini 2.5 Pro", "description": "Stable release (June 17th, 2025) of Gemini 2.5 Pro"},
         {"name": "gemini-2.5-flash", "display_name": "Gemini 2.5 Flash", "description": "Stable version of Gemini 2.5 Flash"},
@@ -169,8 +175,12 @@ STATIC_MODEL_LISTS = {
         {"name": "gemini-3-pro-preview", "display_name": "Gemini 3 Pro Preview", "description": "Gemini 3 Pro Preview"},
         {"name": "gemini-3.1-pro-preview", "display_name": "Gemini 3.1 Pro Preview", "description": "Gemini 3.1 Pro Preview"},
         {"name": "gemini-3-flash-preview", "display_name": "Gemini 3 Flash Preview", "description": "Our most intelligent model built for speed"},
+        {"name": "gemini-pro-latest", "display_name": "Gemini Pro Latest", "description": "Latest release of Gemini Pro"},
+        {"name": "gemini-flash-latest", "display_name": "Gemini Flash Latest", "description": "Latest release of Gemini Flash"},
+        {"name": "gemini-flash-lite-latest", "display_name": "Gemini Flash-Lite Latest", "description": "Latest release of Gemini Flash-Lite"},
+        {"name": "gemini-2.5-flash-image", "display_name": "Gemini 2.5 Flash Image", "description": "State-of-the-art image generation and editing model"},
     ],
-    # GetGeminiVertexModels() - 第 198-291 行
+    # GetGeminiVertexModels() - 与 model_definitions_static_data.go 对齐
     "vertex": [
         {"name": "gemini-2.5-pro", "display_name": "Gemini 2.5 Pro", "description": "Stable release (June 17th, 2025) of Gemini 2.5 Pro"},
         {"name": "gemini-2.5-flash", "display_name": "Gemini 2.5 Flash", "description": "Stable version of Gemini 2.5 Flash"},
@@ -179,6 +189,17 @@ STATIC_MODEL_LISTS = {
         {"name": "gemini-3.1-pro-preview", "display_name": "Gemini 3.1 Pro Preview", "description": "Gemini 3.1 Pro Preview"},
         {"name": "gemini-3-flash-preview", "display_name": "Gemini 3 Flash Preview", "description": "Our most intelligent model built for speed"},
         {"name": "gemini-3-pro-image-preview", "display_name": "Gemini 3 Pro Image Preview", "description": "Gemini 3 Pro Image Preview"},
+        {"name": "imagen-4.0-generate-001", "display_name": "Imagen 4.0 Generate", "description": "Imagen 4.0 image generation model"},
+        {"name": "imagen-4.0-ultra-generate-001", "display_name": "Imagen 4.0 Ultra Generate", "description": "Imagen 4.0 Ultra high-quality image generation model"},
+        {"name": "imagen-3.0-generate-002", "display_name": "Imagen 3.0 Generate", "description": "Imagen 3.0 image generation model"},
+        {"name": "imagen-3.0-fast-generate-001", "display_name": "Imagen 3.0 Fast Generate", "description": "Imagen 3.0 fast image generation model"},
+        {"name": "imagen-4.0-fast-generate-001", "display_name": "Imagen 4.0 Fast Generate", "description": "Imagen 4.0 fast image generation model"},
+    ],
+    # GetKimiModels() - 与 model_definitions_static_data.go 对齐
+    "kimi": [
+        {"name": "kimi-k2", "display_name": "Kimi K2", "description": "Kimi K2 - Moonshot AI's flagship coding model"},
+        {"name": "kimi-k2-thinking", "display_name": "Kimi K2 Thinking", "description": "Kimi K2 Thinking - Extended reasoning model"},
+        {"name": "kimi-k2.5", "display_name": "Kimi K2.5", "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities"},
     ],
 }
 
@@ -375,6 +396,97 @@ def validate_codex_token(refresh_token: str) -> tuple[bool, str]:
         return False, "error"
 
 
+def _codex_models_api_check(access_token: str, account_id: str = "", timeout: float = 12) -> tuple[bool, str]:
+    """
+    用 Codex Models API 校验 access_token 是否仍被 Codex 侧接受（仅一次 GET，快速）。
+    与 scan_auth_json 逻辑一致：401 表示 token 已失效/被吊销。
+    Returns: (is_valid, token_status)
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Version": CODEX_CLIENT_VERSION,
+        "Session_id": str(uuid.uuid4()),
+        "Originator": "codex_cli_rs",
+        "User-Agent": f"codex_cli_rs/{CODEX_CLIENT_VERSION}",
+        "Connection": "Keep-Alive",
+    }
+    if account_id:
+        headers["Chatgpt-Account-Id"] = account_id
+    try:
+        resp = requests.get(
+            f"{CODEX_MODELS_URL}?client_version={CODEX_CLIENT_VERSION}",
+            headers=headers,
+            timeout=timeout,
+            proxies=NO_PROXY,
+        )
+        if resp.status_code == 200:
+            return True, "refreshed"
+        if resp.status_code == 401:
+            return False, "invalid"
+        # 403/429 等可能是额度或权限，不视为“需重新登录”
+        return True, "refreshed"
+    except Exception as e:
+        print(f"Codex models API 请求异常: {e}")
+        return True, "refreshed"  # 网络错误不误判为失效
+
+
+def _codex_refresh_and_get_access_token(auth_data: dict, timeout: float = 15) -> tuple[Optional[str], bool, str]:
+    """
+    刷新 Codex token 并返回新的 access_token。
+    Returns: (access_token, success, token_status)
+    """
+    refresh_token = auth_data.get("refresh_token")
+    if refresh_token:
+        try:
+            resp = requests.post(
+                CODEX_TOKEN_URL,
+                data={
+                    "client_id": CODEX_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "scope": "openid profile email",
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                timeout=timeout,
+                proxies=NO_PROXY,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                access = data.get("access_token")
+                if access:
+                    return access, True, "refreshed"
+            return None, False, "refresh_failed"
+        except Exception as e:
+            print(f"Codex 刷新异常: {e}")
+            return None, False, "error"
+    # 无 refresh_token：用现有 access_token（可能过期）
+    access = auth_data.get("access_token")
+    if access:
+        return access, True, "valid"
+    return None, False, "missing"
+
+
+def validate_codex_account(auth_data: dict) -> tuple[bool, str]:
+    """
+    Codex 专用：先刷新再请求 Codex Models API，仅当 Models 返回 401 时判定为需重新登录。
+    比仅 refresh 更准确（能发现已吊销、Codex 侧不可用的 token）。
+    Returns: (is_valid, token_status)
+    """
+    access_token, refresh_ok, status = _codex_refresh_and_get_access_token(auth_data)
+    if not access_token:
+        return False, status
+    account_id = str(auth_data.get("account_id") or "")
+    valid, api_status = _codex_models_api_check(access_token, account_id=account_id)
+    if not valid:
+        return False, "invalid"
+    return True, api_status or status
+
+
 def validate_claude_token(refresh_token: str) -> tuple[bool, str]:
     """
     验证 Claude (Anthropic) 账户的 token 是否有效
@@ -516,11 +628,11 @@ def validate_token_for_provider(auth_data: dict, provider: str) -> tuple[bool, s
     
     print(f"[Token验证] 开始验证 {provider} 账户的 token...")
     
-    # 调用对应的验证函数
+    # 调用对应的验证函数（Codex 使用刷新 + Models API 双重校验，更准确）
     if provider == "gemini":
         return validate_gemini_token(refresh_token)
     elif provider == "codex":
-        return validate_codex_token(refresh_token)
+        return validate_codex_account(auth_data)
     elif provider == "claude":
         return validate_claude_token(refresh_token)
     elif provider == "qwen":

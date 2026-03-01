@@ -583,6 +583,35 @@
             color: white;
         }
 
+        .filter-state-bar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .state-filter-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .state-filter-toggle:hover {
+            color: #f87171;
+        }
+
+        .state-filter-toggle .count {
+            background: rgba(239, 68, 68, 0.2);
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            color: #f87171;
+        }
+
         .accounts-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
@@ -1545,8 +1574,15 @@
                 <button class="filter-btn" data-filter="pro">
                     PRO <span class="count" id="filterProCount">0</span>
                 </button>
-                <button class="filter-btn filter-btn-relogin" data-filter="needs_relogin">
-                    ⚠️ 需要重新登录 <span class="count" id="filterNeedsReloginCount">0</span>
+            </div>
+            <div class="filter-state-bar">
+                <label class="state-filter-toggle">
+                    <input type="checkbox" id="stateFilterNeedsRelogin" onchange="toggleStateFilterRelogin()">
+                    <span class="toggle-label">⚠️ 仅显示需要重新登录的账户</span>
+                    <span class="count" id="stateFilterNeedsReloginCount">0</span>
+                </label>
+                <button class="btn btn-danger btn-sm" id="bulkDeleteReloginBtn" onclick="showBulkDeleteReloginConfirm()" style="display: none;">
+                    <span>🗑️</span> 批量删除需要重新登录的账户 (<span id="bulkDeleteReloginCount">0</span>)
                 </button>
             </div>
 
@@ -1808,10 +1844,37 @@
         </div>
     </div>
 
+    <!-- Bulk Delete Needs-Re-login Confirm Modal -->
+    <div class="modal-overlay" id="bulkDeleteReloginModal" style="display: none;">
+        <div class="modal" style="max-width: 420px;">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <span>⚠️</span>
+                    批量删除需要重新登录的账户
+                </div>
+                <button class="modal-close" onclick="closeBulkDeleteReloginModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="confirm-dialog">
+                    <div class="icon">🗑️</div>
+                    <h3>确定要删除当前列表中的 <span id="bulkDeleteReloginModalCount">0</span> 个需要重新登录的账户吗？</h3>
+                    <p style="color: var(--accent-red); font-size: 0.85rem;">此操作不可恢复，请确认后再执行。</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" onclick="closeBulkDeleteReloginModal()">取消</button>
+                <button class="btn btn-danger" id="confirmBulkDeleteReloginBtn" onclick="executeBulkDeleteRelogin()">
+                    <span>🗑️</span> 确定删除
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // ==================== Global State ====================
         let accounts = [];
         let currentFilter = 'all';
+        let stateFilterRelogin = false;
         let autoRefreshEnabled = false;
         let autoRefreshInterval = null;
         const CONCURRENCY = 4;
@@ -2093,36 +2156,50 @@
             document.getElementById('filterCodexCount').textContent = accounts.filter(a => a.type === 'codex').length;
             document.getElementById('filterUltraCount').textContent = ultra;
             document.getElementById('filterProCount').textContent = pro;
-            document.getElementById('filterNeedsReloginCount').textContent = needsRelogin;
+            document.getElementById('stateFilterNeedsReloginCount').textContent = needsRelogin;
+            const reloginInView = getFilteredAccounts().filter(a => checkNeedsRelogin(a)).length;
+            document.getElementById('bulkDeleteReloginCount').textContent = reloginInView;
+            const bulkBtn = document.getElementById('bulkDeleteReloginBtn');
+            if (bulkBtn) bulkBtn.style.display = (stateFilterRelogin && reloginInView > 0) ? 'inline-flex' : 'none';
         }
 
-        // 检查账户是否需要重新登录
+        // 检查账户是否需要重新登录（含 Codex Models API 返回的 invalid）
         function checkNeedsRelogin(account) {
-            // 从后端返回的标记
             if (account.needs_relogin) return true;
-            // 从配额数据检查 token_status
             const quota = account.quota;
             if (quota) {
                 const tokenStatus = quota.token_status || '';
-                if (['missing', 'refresh_failed', 'error', 'expired'].includes(tokenStatus)) {
+                if (['missing', 'refresh_failed', 'error', 'expired', 'invalid'].includes(tokenStatus)) {
                     return true;
                 }
             }
             return false;
         }
 
-        function filterAccounts() {
-            if (currentFilter === 'all') return accounts;
+        function getFilteredAccounts() {
+            let list = accounts;
             if (currentFilter === 'ultra') {
-                return accounts.filter(a => (a.subscription_tier || '').toLowerCase().includes('ultra'));
+                list = accounts.filter(a => (a.subscription_tier || '').toLowerCase().includes('ultra'));
+            } else if (currentFilter === 'pro') {
+                list = accounts.filter(a => (a.subscription_tier || '').toLowerCase().includes('pro'));
+            } else if (currentFilter !== 'all') {
+                list = accounts.filter(a => a.type === currentFilter);
             }
-            if (currentFilter === 'pro') {
-                return accounts.filter(a => (a.subscription_tier || '').toLowerCase().includes('pro'));
+            if (stateFilterRelogin) {
+                list = list.filter(a => checkNeedsRelogin(a));
             }
-            if (currentFilter === 'needs_relogin') {
-                return accounts.filter(a => checkNeedsRelogin(a));
-            }
-            return accounts.filter(a => a.type === currentFilter);
+            return list;
+        }
+
+        function filterAccounts() {
+            return getFilteredAccounts();
+        }
+
+        function toggleStateFilterRelogin() {
+            const cb = document.getElementById('stateFilterNeedsRelogin');
+            stateFilterRelogin = cb ? cb.checked : false;
+            updateStats();
+            renderAccounts();
         }
 
         function renderAccounts() {
@@ -2312,9 +2389,9 @@
             if (account) {
                 account.quota = data.quota;
                 account.subscription_tier = data.subscription_tier;
-                // 根据刷新结果更新 needs_relogin 状态
+                // 根据刷新结果更新 needs_relogin 状态（含 invalid=Codex Models API 401）
                 const tokenStatus = (data.quota && data.quota.token_status) || '';
-                account.needs_relogin = ['missing', 'refresh_failed', 'error', 'expired'].includes(tokenStatus);
+                account.needs_relogin = ['missing', 'refresh_failed', 'error', 'expired', 'invalid'].includes(tokenStatus);
             }
 
             const quotaEl = document.getElementById(`quota-${accountId}`);
@@ -2430,9 +2507,9 @@
 
                     if (resp.ok) {
                         updateAccountUI(account.id, data);
-                        // 根据刷新结果更新 needs_relogin 状态
+                        // 根据刷新结果更新 needs_relogin 状态（含 invalid）
                         const tokenStatus = (data.quota && data.quota.token_status) || '';
-                        account.needs_relogin = ['missing', 'refresh_failed', 'error', 'expired'].includes(tokenStatus);
+                        account.needs_relogin = ['missing', 'refresh_failed', 'error', 'expired', 'invalid'].includes(tokenStatus);
                         success++;
                     } else {
                         failed++;
@@ -3031,11 +3108,58 @@
             }
         }
 
+        function showBulkDeleteReloginConfirm() {
+            const list = getFilteredAccounts().filter(a => checkNeedsRelogin(a));
+            if (list.length === 0) {
+                showToast('当前列表中没有需要重新登录的账户', 'error');
+                return;
+            }
+            document.getElementById('bulkDeleteReloginModalCount').textContent = list.length;
+            document.getElementById('bulkDeleteReloginModal').style.display = 'flex';
+        }
+
+        function closeBulkDeleteReloginModal() {
+            document.getElementById('bulkDeleteReloginModal').style.display = 'none';
+        }
+
+        async function executeBulkDeleteRelogin() {
+            const list = getFilteredAccounts().filter(a => checkNeedsRelogin(a));
+            if (list.length === 0) {
+                closeBulkDeleteReloginModal();
+                return;
+            }
+            const btn = document.getElementById('confirmBulkDeleteReloginBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> 删除中...';
+            let done = 0;
+            let failed = 0;
+            try {
+                for (const account of list) {
+                    const name = account.name || account.id;
+                    try {
+                        const resp = await fetch(`/api/accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                        const data = await resp.json();
+                        if (resp.ok && data.success) done++;
+                        else failed++;
+                    } catch (_) {
+                        failed++;
+                    }
+                }
+                showToast(`批量删除完成: ${done} 成功${failed > 0 ? ', ' + failed + ' 失败' : ''}`, failed > 0 ? 'error' : 'success');
+                closeBulkDeleteReloginModal();
+                loadAccounts();
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<span>🗑️</span> 确定删除';
+            }
+        }
+
         // Close modals on ESC key
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeAddAccountModal();
                 closeDeleteModal();
+                closeBulkDeleteReloginModal();
             }
         });
 
@@ -3049,6 +3173,12 @@
         document.getElementById('deleteConfirmModal').addEventListener('click', (e) => {
             if (e.target.classList.contains('modal-overlay')) {
                 closeDeleteModal();
+            }
+        });
+
+        document.getElementById('bulkDeleteReloginModal').addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal-overlay')) {
+                closeBulkDeleteReloginModal();
             }
         });
 

@@ -271,8 +271,8 @@ def api_accounts():
             # 检查 token 状态，判断是否需要重新登录
             quota_data = cached.get("quota", {})
             token_status = quota_data.get("token_status", "") if quota_data else ""
-            # 当 token_status 为 missing/refresh_failed/error/expired 时，标记为需要重新登录
-            if token_status in ("missing", "refresh_failed", "error", "expired"):
+            # 当 token_status 为 missing/refresh_failed/error/expired/invalid 时，标记为需要重新登录（invalid=Codex Models API 401）
+            if token_status in ("missing", "refresh_failed", "error", "expired", "invalid"):
                 account["needs_relogin"] = True
         
         accounts.append(account)
@@ -283,8 +283,8 @@ def api_accounts():
 # 支持配额查询的 provider 类型（与 quota_service 保持一致）
 # 注意：只有 Antigravity 可以使用 fetchAvailableModels API
 SUPPORTED_QUOTA_PROVIDERS = ["antigravity"]
-# 支持静态模型列表的 provider 类型（Gemini CLI 也是静态列表）
-STATIC_MODELS_PROVIDERS = ["gemini", "codex", "claude", "qwen", "iflow", "aistudio", "vertex"]
+# 支持静态模型列表的 provider 类型（Gemini CLI 也是静态列表）；与 quota_service 及 CLIProxyAPI 对齐
+STATIC_MODELS_PROVIDERS = ["gemini", "codex", "claude", "qwen", "iflow", "aistudio", "vertex", "kimi"]
 # 所有支持模型信息查询的 provider
 ALL_SUPPORTED_PROVIDERS = SUPPORTED_QUOTA_PROVIDERS + STATIC_MODELS_PROVIDERS
 
@@ -471,6 +471,7 @@ OAUTH_PROVIDERS = {
     "claude": {"flag": "-claude-login", "port": 54545},
     "qwen": {"flag": "-qwen-login", "port": 0},  # Qwen 使用设备码模式，无端口
     "iflow": {"flag": "-iflow-login", "port": 55998},
+    "kimi": {"flag": "-kimi-login", "port": 0},  # Kimi 使用设备码模式，无端口
 }
 
 # 存储正在进行的 OAuth 登录状态（使用 pty 支持交互式输入）
@@ -592,6 +593,7 @@ class InteractiveOAuthSession:
             "Claude authentication successful!",       # Claude 完成
             "Qwen authentication successful!",         # Qwen 完成
             "iFlow authentication successful!",        # iFlow 完成
+            "Kimi authentication successful!",         # Kimi 完成
             "Antigravity authentication successful!",  # Antigravity 完成
             "saved to",                                # 保存成功的通用标志
         ]
