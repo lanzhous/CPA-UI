@@ -46,6 +46,29 @@ python app.py
 ./start-linux.sh
 ```
 
+### 方式三：Windows 10/11 原生启动
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-windows.ps1
+```
+
+仅做环境检查（不启动服务）：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-windows.ps1 -CheckOnly
+```
+
+强制重装依赖：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-windows.ps1 -ReinstallDeps
+```
+
+说明：
+- 该脚本会自动创建 `venv`、安装依赖并启动 `app.py`。
+- 支持 Windows 10/11 原生运行（不依赖 WSL）。
+- 会自动探测 CLIProxyAPI 配置目录，优先级为：`CLIPROXYAPI_DIR` → `%USERPROFILE%\\cliproxyapi` → `..\\CLIProxyAPI`。
+- 如已手动设置 `CPA_CONFIG_PATH`，则优先使用你设置的路径。
+- 启动后默认访问 `http://127.0.0.1:5000`。
+- 启动日志文件：`start-windows-last.log`。
+
 默认访问 http://127.0.0.1:5000
 
 ## 配置

@@ -16,15 +16,24 @@ import os
 import time
 import subprocess
 import signal
-import pty
 import select
-import fcntl
-import termios
-import struct
+from collections import deque
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 import requests
 import threading
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+IS_WINDOWS = os.name == "nt"
+
+if not IS_WINDOWS:
+    import pty
+    import fcntl
+    import termios
+    import struct
 
 from config import (
     MANAGEMENT_API_URL,
@@ -476,14 +485,28 @@ OAUTH_PROVIDERS = {
     "kimi": {"flag": "-kimi-login", "port": 0},  # Kimi 使用设备码模式，无端口
 }
 
+
+def resolve_binary_path(service_dir: str, binary_name: str) -> str:
+    """解析可执行文件路径，兼容 Windows .exe"""
+    base_path = os.path.join(service_dir, binary_name)
+    if os.path.exists(base_path):
+        return base_path
+
+    if IS_WINDOWS and not binary_name.lower().endswith(".exe"):
+        exe_path = f"{base_path}.exe"
+        if os.path.exists(exe_path):
+            return exe_path
+
+    return base_path
+
 # 存储正在进行的 OAuth 登录状态（使用 pty 支持交互式输入）
 oauth_sessions = {}
 oauth_sessions_lock = threading.Lock()
 
 
 class InteractiveOAuthSession:
-    """交互式 OAuth 会话管理类，使用 pty 支持交互式输入输出"""
-    
+    """交互式 OAuth 会话管理类，跨平台支持交互式输入输出"""
+
     def __init__(self, session_id: str, provider: str, cmd: list, cwd: str):
         self.session_id = session_id
         self.provider = provider
@@ -496,37 +519,71 @@ class InteractiveOAuthSession:
         self.output_lock = threading.Lock()
         self.master_fd = None
         self.slave_fd = None
+        self.process = None
         self.pid = None
         self.needs_input = False
         self.input_prompt = ""
         self.completed = False
-        
+
     def start(self):
         """启动交互式进程"""
+        if IS_WINDOWS:
+            return self._start_windows_process()
+        return self._start_unix_pty()
+
+    def _start_windows_process(self):
+        """Windows: 使用 subprocess + PIPE 实现交互"""
+        try:
+            creation_flags = 0
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creation_flags |= subprocess.CREATE_NO_WINDOW
+
+            self.process = subprocess.Popen(
+                self.cmd,
+                cwd=self.cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=0,
+                creationflags=creation_flags,
+            )
+            self.pid = self.process.pid
+            self.status = "running"
+
+            reader_thread = threading.Thread(target=self._read_output, daemon=True)
+            reader_thread.start()
+            return True
+        except Exception as e:
+            self.status = "error"
+            self.error = str(e)
+            return False
+
+    def _start_unix_pty(self):
+        """Unix: 使用 PTY 保持原有交互行为"""
         try:
             # 创建伪终端
             self.master_fd, self.slave_fd = pty.openpty()
-            
+
             # 设置终端大小
             winsize = struct.pack('HHHH', 50, 120, 0, 0)
             fcntl.ioctl(self.slave_fd, termios.TIOCSWINSZ, winsize)
-            
+
             # Fork 进程
             self.pid = os.fork()
-            
+
             if self.pid == 0:
                 # 子进程
                 os.close(self.master_fd)
                 os.setsid()
-                
+
                 # 设置 slave 为控制终端
                 os.dup2(self.slave_fd, 0)  # stdin
                 os.dup2(self.slave_fd, 1)  # stdout
                 os.dup2(self.slave_fd, 2)  # stderr
-                
+
                 if self.slave_fd > 2:
                     os.close(self.slave_fd)
-                
+
                 # 切换工作目录并执行命令
                 os.chdir(self.cwd)
                 os.execvp(self.cmd[0], self.cmd)
@@ -535,21 +592,58 @@ class InteractiveOAuthSession:
                 os.close(self.slave_fd)
                 self.slave_fd = None
                 self.status = "running"
-                
+
                 # 设置非阻塞读取
                 flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
                 fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                
+
                 # 启动输出读取线程
                 reader_thread = threading.Thread(target=self._read_output, daemon=True)
                 reader_thread.start()
-                
+
                 return True
         except Exception as e:
             self.status = "error"
             self.error = str(e)
             return False
-    
+
+    def _process_output_text(self, decoded: str, url_pattern, input_prompts, success_keywords, oauth_domains):
+        """统一处理输出文本，提取 URL/输入提示/成功状态"""
+        if not decoded:
+            return
+
+        with self.output_lock:
+            self.output_buffer += decoded
+
+            for keyword in success_keywords:
+                if keyword.lower() in decoded.lower():
+                    self.status = "ok"
+                    self.completed = True
+                    self.needs_input = False
+                    return
+
+            recent_output = self.output_buffer[-1000:]
+            recent_lower = recent_output.lower()
+
+            input_detected = False
+            for prompt in input_prompts:
+                if prompt.lower() in recent_lower:
+                    self.needs_input = True
+                    self.input_prompt = prompt
+                    self.status = "needs_input"
+                    input_detected = True
+                    break
+
+            if not input_detected:
+                all_matches = url_pattern.findall(self.output_buffer)
+                for potential_url in all_matches:
+                    potential_url = potential_url.rstrip(')')
+                    if any(domain in potential_url for domain in oauth_domains):
+                        if self.url is None or len(potential_url) > len(self.url):
+                            self.url = potential_url
+                            if not self.needs_input:
+                                self.status = "waiting_callback"
+
     def _read_output(self):
         """读取进程输出的线程"""
         import re
@@ -612,26 +706,49 @@ class InteractiveOAuthSession:
             "login",
             "auth0.com"
         ]
-        
+
         while not self.completed:
             try:
-                # 检查子进程是否还在运行
+                if IS_WINDOWS:
+                    if not self.process or not self.process.stdout:
+                        break
+
+                    data = self.process.stdout.read(1)
+                    if data:
+                        decoded = data.decode('utf-8', errors='replace')
+                        decoded = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
+                        decoded = re.sub(r'\x1b\][^\x07]*\x07', '', decoded)
+                        decoded = re.sub(r'\x1b[()][AB012]', '', decoded)
+                        self._process_output_text(decoded, url_pattern, input_prompts, success_keywords, oauth_domains)
+                        continue
+
+                    exit_code = self.process.poll()
+                    if exit_code is not None:
+                        self.completed = True
+                        if exit_code == 0:
+                            if self.status != "ok":
+                                self.status = "ok"
+                        elif self.status not in ["ok", "error"]:
+                            self.status = "error"
+                            self.error = f"进程退出码: {exit_code}"
+                        break
+
+                    time.sleep(0.05)
+                    continue
+
                 pid_result, exit_status = os.waitpid(self.pid, os.WNOHANG)
                 if pid_result != 0:
-                    # 进程已退出
                     self.completed = True
                     if os.WIFEXITED(exit_status):
                         exit_code = os.WEXITSTATUS(exit_status)
                         if exit_code == 0:
                             if self.status != "ok":
                                 self.status = "ok"
-                        else:
-                            if self.status not in ["ok", "error"]:
-                                self.status = "error"
-                                self.error = f"进程退出码: {exit_code}"
+                        elif self.status not in ["ok", "error"]:
+                            self.status = "error"
+                            self.error = f"进程退出码: {exit_code}"
                     break
-                
-                # 尝试读取输出
+
                 if self.master_fd is not None:
                     ready, _, _ = select.select([self.master_fd], [], [], 0.1)
                     if ready:
@@ -639,100 +756,60 @@ class InteractiveOAuthSession:
                             data = os.read(self.master_fd, 4096)
                             if data:
                                 decoded = data.decode('utf-8', errors='replace')
-                                # 清理 ANSI 转义序列（更完整的模式）
                                 decoded = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
-                                decoded = re.sub(r'\x1b\][^\x07]*\x07', '', decoded)  # OSC 序列
-                                decoded = re.sub(r'\x1b[()][AB012]', '', decoded)  # 字符集选择
-                                
-                                with self.output_lock:
-                                    self.output_buffer += decoded
-                                    
-                                    # 先检查是否成功完成（最高优先级）
-                                    for keyword in success_keywords:
-                                        if keyword.lower() in decoded.lower():
-                                            self.status = "ok"
-                                            self.completed = True
-                                            self.needs_input = False
-                                            break
-                                    
-                                    # 如果已完成，跳过其他检测
-                                    if self.completed:
-                                        continue
-                                    
-                                    # 检查是否需要用户输入（使用更大的检测范围）
-                                    # 检测范围改为最后 1000 字符，确保能捕获到提示
-                                    recent_output = self.output_buffer[-1000:]
-                                    recent_lower = recent_output.lower()
-                                    
-                                    input_detected = False
-                                    for prompt in input_prompts:
-                                        if prompt.lower() in recent_lower:
-                                            self.needs_input = True
-                                            self.input_prompt = prompt
-                                            self.status = "needs_input"
-                                            input_detected = True
-                                            break
-                                    
-                                    # 只有在没有检测到输入需求时才更新 URL 状态
-                                    if not input_detected:
-                                        # 在完整的 output_buffer 上搜索 URL
-                                        all_matches = url_pattern.findall(self.output_buffer)
-                                        for potential_url in all_matches:
-                                            # 清理 URL 末尾可能的无效字符
-                                            potential_url = potential_url.rstrip(')')
-                                            
-                                            # 检查是否是 OAuth URL
-                                            if any(domain in potential_url for domain in oauth_domains):
-                                                # 如果已有 URL，只在新 URL 更长时更新
-                                                if self.url is None or len(potential_url) > len(self.url):
-                                                    self.url = potential_url
-                                                    # 只有在不需要输入时才设置 waiting_callback
-                                                    if not self.needs_input:
-                                                        self.status = "waiting_callback"
+                                decoded = re.sub(r'\x1b\][^\x07]*\x07', '', decoded)
+                                decoded = re.sub(r'\x1b[()][AB012]', '', decoded)
+                                self._process_output_text(decoded, url_pattern, input_prompts, success_keywords, oauth_domains)
                         except (OSError, IOError):
                             pass
                 else:
                     time.sleep(0.1)
-                    
             except ChildProcessError:
-                # 子进程已退出
                 self.completed = True
                 break
             except Exception as e:
                 if not self.completed:
                     self.error = str(e)
                 break
-        
+
         # 清理资源
         self._cleanup()
-    
+
     def send_input(self, text: str) -> bool:
         """发送输入到进程"""
-        if self.master_fd is None or self.completed:
+        if self.completed:
             return False
-        
+
         try:
             # 确保以换行符结尾
             if not text.endswith('\n'):
                 text += '\n'
-            
-            os.write(self.master_fd, text.encode('utf-8'))
-            
+
+            if IS_WINDOWS:
+                if not self.process or not self.process.stdin:
+                    return False
+                self.process.stdin.write(text.encode('utf-8', errors='replace'))
+                self.process.stdin.flush()
+            else:
+                if self.master_fd is None:
+                    return False
+                os.write(self.master_fd, text.encode('utf-8'))
+
             with self.output_lock:
                 self.needs_input = False
                 self.input_prompt = ""
                 self.status = "running"
-            
+
             return True
         except Exception as e:
             self.error = str(e)
             return False
-    
+
     def get_output(self) -> str:
         """获取当前输出缓冲区"""
         with self.output_lock:
             return self.output_buffer
-    
+
     def get_status(self) -> dict:
         """获取会话状态"""
         with self.output_lock:
@@ -745,10 +822,24 @@ class InteractiveOAuthSession:
                 "input_prompt": self.input_prompt,
                 "completed": self.completed,
             }
-    
+
     def terminate(self):
         """终止进程"""
         self.completed = True
+
+        if IS_WINDOWS:
+            if self.process:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=1.5)
+                except Exception:
+                    try:
+                        self.process.kill()
+                    except Exception:
+                        pass
+            self._cleanup()
+            return
+
         if self.pid:
             try:
                 # 先尝试 SIGTERM
@@ -764,7 +855,7 @@ class InteractiveOAuthSession:
             except ProcessLookupError:
                 pass
         self._cleanup()
-    
+
     def _cleanup(self):
         """清理资源"""
         if self.master_fd is not None:
@@ -773,6 +864,21 @@ class InteractiveOAuthSession:
             except OSError:
                 pass
             self.master_fd = None
+
+        if self.process:
+            try:
+                if self.process.stdin:
+                    self.process.stdin.close()
+            except Exception:
+                pass
+
+            try:
+                if self.process.stdout:
+                    self.process.stdout.close()
+            except Exception:
+                pass
+
+            self.process = None
 
 
 @app.route("/api/accounts/<account_name>", methods=["DELETE"])
@@ -839,7 +945,7 @@ def api_start_oauth(provider: str):
     callback_port = provider_config["port"]
     
     # 检查 CLIProxyAPI 可执行文件
-    binary_path = os.path.join(CPA_SERVICE_DIR, CPA_BINARY_NAME)
+    binary_path = resolve_binary_path(CPA_SERVICE_DIR, CPA_BINARY_NAME)
     if not os.path.exists(binary_path):
         return jsonify({"error": f"CLIProxyAPI 可执行文件不存在: {binary_path}"}), 400
     
@@ -1069,40 +1175,62 @@ def api_cancel_oauth():
 
 def get_service_status():
     """获取 CLIProxyAPI 服务状态"""
+    if not psutil:
+        return {
+            "running": False,
+            "error": "缺少 psutil 依赖，请先安装 requirements.txt",
+            "pids": [],
+            "processes": [],
+            "count": 0,
+        }
+
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", CPA_BINARY_NAME],
-            capture_output=True,
-            text=True
-        )
-        pids = [p.strip() for p in result.stdout.strip().split('\n') if p.strip()]
-        
-        if pids:
-            # 获取进程详细信息
-            processes = []
-            for pid in pids:
-                try:
-                    ps_result = subprocess.run(
-                        ["ps", "-p", pid, "-o", "pid,ppid,%cpu,%mem,etime,command"],
-                        capture_output=True,
-                        text=True
-                    )
-                    lines = ps_result.stdout.strip().split('\n')
-                    if len(lines) > 1:
-                        processes.append({
-                            "pid": pid,
-                            "info": lines[1].strip()
-                        })
-                except Exception:
-                    processes.append({"pid": pid, "info": ""})
-            
-            return {
-                "running": True,
-                "pids": pids,
-                "processes": processes,
-                "count": len(pids)
-            }
-        return {"running": False, "pids": [], "processes": [], "count": 0}
+        binary_name_lower = CPA_BINARY_NAME.lower()
+        matched = []
+
+        for proc in psutil.process_iter(attrs=["pid", "name", "cmdline", "exe", "ppid", "cpu_percent", "memory_info", "create_time"]):
+            info = proc.info
+            pid = info.get("pid")
+            if not pid or pid == os.getpid():
+                continue
+
+            name = (info.get("name") or "").lower()
+            exe = os.path.basename(info.get("exe") or "").lower()
+            cmdline = " ".join(info.get("cmdline") or []).lower()
+
+            if binary_name_lower not in name and binary_name_lower not in exe and binary_name_lower not in cmdline:
+                continue
+
+            mem_mb = 0.0
+            memory_info = info.get("memory_info")
+            if memory_info and hasattr(memory_info, "rss"):
+                mem_mb = memory_info.rss / (1024 * 1024)
+
+            uptime = ""
+            create_time = info.get("create_time")
+            if create_time:
+                elapsed = max(0, int(time.time() - create_time))
+                hours = elapsed // 3600
+                minutes = (elapsed % 3600) // 60
+                seconds = elapsed % 60
+                uptime = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+            cpu_percent = info.get("cpu_percent", 0.0)
+            if cpu_percent is None:
+                cpu_percent = 0.0
+
+            matched.append({
+                "pid": str(pid),
+                "info": f"pid={pid} ppid={info.get('ppid', '')} cpu={float(cpu_percent):.1f}% mem={mem_mb:.1f}MB uptime={uptime} cmd={cmdline[:240]}",
+            })
+
+        pids = [item["pid"] for item in matched]
+        return {
+            "running": len(matched) > 0,
+            "pids": pids,
+            "processes": matched,
+            "count": len(matched),
+        }
     except Exception as e:
         return {"running": False, "error": str(e), "pids": [], "processes": [], "count": 0}
 
@@ -1124,7 +1252,7 @@ def api_service_start():
     if not CPA_SERVICE_DIR or not os.path.exists(CPA_SERVICE_DIR):
         return jsonify({"error": "服务目录未配置或不存在", "service_dir": CPA_SERVICE_DIR}), 400
     
-    binary_path = os.path.join(CPA_SERVICE_DIR, CPA_BINARY_NAME)
+    binary_path = resolve_binary_path(CPA_SERVICE_DIR, CPA_BINARY_NAME)
     if not os.path.exists(binary_path):
         return jsonify({"error": f"可执行文件不存在: {binary_path}"}), 400
     
@@ -1138,19 +1266,25 @@ def api_service_start():
         })
     
     try:
-        # 使用 nohup 启动服务
         log_file = CPA_LOG_FILE or os.path.join(CPA_SERVICE_DIR, "cliproxyapi.log")
-        
-        # 创建启动命令
-        cmd = f"cd {CPA_SERVICE_DIR} && nohup ./{CPA_BINARY_NAME} > {log_file} 2>&1 &"
-        
-        subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=CPA_SERVICE_DIR
-        )
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+        log_handle = open(log_file, "ab")
+        creation_flags = 0
+        if IS_WINDOWS and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags |= subprocess.CREATE_NO_WINDOW
+
+        try:
+            subprocess.Popen(
+                [binary_path],
+                cwd=CPA_SERVICE_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags,
+            )
+        finally:
+            log_handle.close()
         
         # 等待一小段时间让进程启动
         time.sleep(1)
@@ -1183,40 +1317,41 @@ def api_service_stop():
             "message": "服务未在运行"
         })
     
+    if not psutil:
+        return jsonify({"error": "缺少 psutil 依赖，请先安装 requirements.txt"}), 500
+
     try:
-        # 使用 pkill 停止服务
-        result = subprocess.run(
-            ["pkill", "-f", CPA_BINARY_NAME],
-            capture_output=True,
-            text=True
-        )
-        
-        # 等待进程退出
-        time.sleep(0.5)
-        
-        # 检查停止结果
-        new_status = get_service_status()
-        if not new_status["running"]:
-            return jsonify({
-                "success": True,
-                "message": "服务已停止",
-                "killed_pids": status["pids"]
-            })
-        else:
-            # 强制杀死
-            subprocess.run(
-                ["pkill", "-9", "-f", CPA_BINARY_NAME],
-                capture_output=True,
-                text=True
-            )
-            time.sleep(0.3)
-            final_status = get_service_status()
-            return jsonify({
-                "success": not final_status["running"],
-                "message": "服务已强制停止" if not final_status["running"] else "停止服务失败",
-                "remaining_pids": final_status["pids"]
-            })
-            
+        processes = []
+        for pid_text in status.get("pids", []):
+            try:
+                processes.append(psutil.Process(int(pid_text)))
+            except Exception:
+                continue
+
+        for process in processes:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+
+        _, alive = psutil.wait_procs(processes, timeout=2.5)
+        for process in alive:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+        if alive:
+            psutil.wait_procs(alive, timeout=1.5)
+
+        time.sleep(0.3)
+        final_status = get_service_status()
+        return jsonify({
+            "success": not final_status["running"],
+            "message": "服务已停止" if not final_status["running"] else "停止服务失败",
+            "killed_pids": status["pids"],
+            "remaining_pids": final_status["pids"],
+        })
     except Exception as e:
         return jsonify({"error": f"停止服务失败: {str(e)}"}), 500
 
@@ -1297,17 +1432,14 @@ def api_logs_tail():
         return jsonify({"content": "", "lines": 0})
     
     lines = request.args.get("lines", 50, type=int)
-    
+
     try:
-        # 使用 tail 命令高效读取尾部
-        result = subprocess.run(
-            ["tail", f"-{lines}", CPA_LOG_FILE],
-            capture_output=True,
-            text=True
-        )
+        with open(CPA_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            tail_lines = list(deque(f, maxlen=max(1, lines)))
+
         return jsonify({
-            "content": result.stdout,
-            "lines": lines
+            "content": "".join(tail_lines),
+            "lines": len(tail_lines)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
