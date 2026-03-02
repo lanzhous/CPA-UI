@@ -284,8 +284,9 @@ def api_accounts():
             # 检查 token 状态，判断是否需要重新登录
             quota_data = cached.get("quota", {})
             token_status = quota_data.get("token_status", "") if quota_data else ""
-            # 当 token_status 为 missing/refresh_failed/error/expired/invalid 时，标记为需要重新登录（invalid=Codex Models API 401）
-            if token_status in ("missing", "refresh_failed", "error", "expired", "invalid"):
+            # 仅当 token_status 为 missing / expired / invalid 时，标记为需要重新登录
+            # invalid = Codex Models API 401；error / refresh_failed 可能是网络或限流问题，不直接视为失效
+            if token_status in ("missing", "expired", "invalid"):
                 account["needs_relogin"] = True
         
         accounts.append(account)

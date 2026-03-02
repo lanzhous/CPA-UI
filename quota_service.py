@@ -17,7 +17,8 @@ from config import (
     ANTIGRAVITY_CLIENT_ID,
     ANTIGRAVITY_CLIENT_SECRET,
     GEMINI_CLI_USER_AGENT,
-    GOOGLE_TOKEN_URL
+    GOOGLE_TOKEN_URL,
+    PROXY_URL,
 )
 
 # 支持配额查询的 provider 类型（可获取实时配额信息）
@@ -252,8 +253,12 @@ def get_static_models_for_provider(provider: str, auth_data: dict = None) -> dic
     return result
 
 
-# 禁用代理
-NO_PROXY = {"http": None, "https": None}
+# requests 代理配置：若 CLIProxyAPI config.yaml 中配置了 proxy-url（或环境变量 CPA_PROXY_URL），则共用该代理；
+# 否则使用 requests 默认行为（可继承系统环境变量或直连）
+if PROXY_URL:
+    REQUESTS_PROXIES = {"http": PROXY_URL, "https": PROXY_URL}
+else:
+    REQUESTS_PROXIES = None
 
 
 def refresh_access_token(refresh_token: str, provider: str = "antigravity") -> Optional[dict]:
@@ -280,7 +285,7 @@ def refresh_access_token(refresh_token: str, provider: str = "antigravity") -> O
                 "refresh_token": refresh_token
             },
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES
         )
         if resp.status_code == 200:
             return resp.json()
@@ -306,10 +311,10 @@ def validate_gemini_token(refresh_token: str) -> tuple[bool, str]:
                 "client_id": GEMINI_CLI_CLIENT_ID,
                 "client_secret": GEMINI_CLI_CLIENT_SECRET,
                 "grant_type": "refresh_token",
-                "refresh_token": refresh_token
+                "refresh_token": refresh_token,
             },
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES,
         )
         if resp.status_code == 200:
             return True, "refreshed"
@@ -382,10 +387,10 @@ def validate_codex_token(refresh_token: str) -> tuple[bool, str]:
             },
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json"
+                "Accept": "application/json",
             },
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES,
         )
         if resp.status_code == 200:
             return True, "refreshed"
@@ -419,7 +424,7 @@ def _codex_models_api_check(access_token: str, account_id: str = "", timeout: fl
             f"{CODEX_MODELS_URL}?client_version={CODEX_CLIENT_VERSION}",
             headers=headers,
             timeout=timeout,
-            proxies=NO_PROXY,
+            proxies=REQUESTS_PROXIES,
         )
         if resp.status_code == 200:
             return True, "refreshed"
@@ -453,7 +458,7 @@ def _codex_refresh_and_get_access_token(auth_data: dict, timeout: float = 15) ->
                     "Accept": "application/json",
                 },
                 timeout=timeout,
-                proxies=NO_PROXY,
+                proxies=REQUESTS_PROXIES,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -506,7 +511,7 @@ def validate_claude_token(refresh_token: str) -> tuple[bool, str]:
                 "Accept": "application/json"
             },
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES
         )
         if resp.status_code == 200:
             return True, "refreshed"
@@ -535,7 +540,7 @@ def validate_qwen_token(refresh_token: str) -> tuple[bool, str]:
                 "Content-Type": "application/x-www-form-urlencoded"
             },
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES
         )
         if resp.status_code == 200:
             return True, "refreshed"
@@ -565,7 +570,7 @@ def validate_iflow_token(refresh_token: str) -> tuple[bool, str]:
                 "Content-Type": "application/x-www-form-urlencoded"
             },
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES
         )
         if resp.status_code == 200:
             return True, "refreshed"
@@ -687,7 +692,7 @@ def fetch_project_and_tier(access_token: str, provider: str = "antigravity") -> 
             headers=headers,
             json={"metadata": metadata},
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES
         )
         
         if resp.status_code == 200:
@@ -747,7 +752,7 @@ def fetch_quota_with_token(access_token: str, project_id: Optional[str] = None, 
             headers=headers,
             json={"project": final_project_id},
             timeout=15,
-            proxies=NO_PROXY
+            proxies=REQUESTS_PROXIES
         )
         
         if resp.status_code == 403:

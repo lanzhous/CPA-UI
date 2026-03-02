@@ -2184,7 +2184,8 @@
             const quota = account.quota;
             if (quota) {
                 const tokenStatus = quota.token_status || '';
-                if (['missing', 'refresh_failed', 'error', 'expired', 'invalid'].includes(tokenStatus)) {
+                // 仅当 tokenStatus 为 missing / expired / invalid 时认为需要重新登录
+                if (['missing', 'expired', 'invalid'].includes(tokenStatus)) {
                     return true;
                 }
             }

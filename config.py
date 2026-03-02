@@ -76,6 +76,9 @@ else:
 CPA_BINARY_NAME = os.environ.get("CPA_BINARY_NAME", "CLIProxyAPI")
 CPA_LOG_FILE = os.environ.get("CPA_LOG_FILE", os.path.join(CPA_SERVICE_DIR, "cliproxyapi.log") if CPA_SERVICE_DIR else "")
 
+# 代理配置：优先环境变量 CPA_PROXY_URL，其次使用 config.yaml 中的 proxy-url
+PROXY_URL = os.environ.get("CPA_PROXY_URL") or _project_config.get("proxy-url", "")
+
 # Google Cloud Code API (用于获取 Antigravity/Gemini CLI 配额)
 CLOUD_CODE_API_URL = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_USER_AGENT = "antigravity/1.11.3 Darwin/arm64"
