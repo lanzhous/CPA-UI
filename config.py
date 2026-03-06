@@ -63,7 +63,7 @@ WEBUI_DEBUG = os.environ.get("WEBUI_DEBUG", "false").lower() == "true"
 
 # 认证目录 - 优先环境变量 CPA_AUTH_DIR，否则从 config.yaml 读取
 _auth_dir = os.environ.get("CPA_AUTH_DIR") or _project_config.get("auth-dir", "~/.cli-proxy-api")
-AUTH_DIR = os.path.expanduser(_auth_dir)
+AUTH_DIR = os.path.normpath(os.path.expanduser(_auth_dir))
 
 # CLIProxyAPI 服务目录和日志配置
 # 从环境变量 CPA_CONFIG_PATH 推导服务目录，或使用 CPA_SERVICE_DIR 环境变量
