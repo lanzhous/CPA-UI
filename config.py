@@ -42,6 +42,8 @@ def load_project_config():
 
 
 # 加载项目配置
+CONFIG_YAML_PATH = find_config_yaml()
+PROJECT_CONFIG_DIR = CONFIG_YAML_PATH.parent if CONFIG_YAML_PATH else None
 _project_config = load_project_config()
 
 # 从 config.yaml 获取端口
@@ -67,7 +69,7 @@ AUTH_DIR = os.path.normpath(os.path.expanduser(_auth_dir))
 
 # CLIProxyAPI 服务目录和日志配置
 # 从环境变量 CPA_CONFIG_PATH 推导服务目录，或使用 CPA_SERVICE_DIR 环境变量
-_config_path = find_config_yaml()
+_config_path = CONFIG_YAML_PATH
 if _config_path:
     CPA_SERVICE_DIR = os.environ.get("CPA_SERVICE_DIR", str(_config_path.parent))
 else:

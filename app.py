@@ -17,11 +17,16 @@ import time
 import subprocess
 import signal
 import select
+import hashlib
+from datetime import datetime, timezone
 from collections import deque
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request
+from typing import Optional, Tuple
+from urllib.parse import urlparse
+from flask import Flask, render_template, jsonify, request, Response
 import requests
 import threading
+import yaml
 try:
     import psutil
 except Exception:
@@ -49,6 +54,7 @@ from config import (
     API_PORT,
     API_HOST,
     QUOTA_REFRESH_CONCURRENCY,
+    CONFIG_YAML_PATH,
 )
 from quota_service import get_quota_for_account, refresh_access_token, fetch_project_and_tier
 
@@ -76,6 +82,368 @@ QUOTA_CACHE_FILE = Path(__file__).parent / "quota_cache.json"
 
 # 禁用代理
 NO_PROXY = {"http": None, "https": None}
+
+APP_DIR = Path(__file__).resolve().parent
+REMOTE_PANEL_DIR = APP_DIR / "managed_panel"
+REMOTE_PANEL_HTML = REMOTE_PANEL_DIR / "management.html"
+REMOTE_PANEL_STATE_FILE = REMOTE_PANEL_DIR / "state.json"
+REMOTE_PANEL_SETTINGS_FILE = REMOTE_PANEL_DIR / "settings.json"
+DEFAULT_PANEL_REPO_URL = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+GITHUB_API_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "CPA-web-UI/1.0",
+}
+REMOTE_PANEL_DEFAULTS = {
+    "allow_remote_management": False,
+    "disable_control_panel": False,
+    "secret_key": "",
+    "panel_repo_url": DEFAULT_PANEL_REPO_URL,
+}
+REMOTE_PROXY_TIMEOUT = 30
+HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "content-encoding",
+}
+
+
+def ensure_remote_panel_dir():
+    REMOTE_PANEL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_json_file(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json_file(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def normalize_repo_url(repo_url: str) -> str:
+    value = (repo_url or "").strip()
+    if not value:
+        return DEFAULT_PANEL_REPO_URL
+
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").lower()
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+
+    if host in {"github.com", "www.github.com", "api.github.com"} and len(parts) >= 2:
+        owner, repo = parts[0], parts[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        return f"https://github.com/{owner}/{repo}"
+
+    return value.rstrip("/")
+
+
+def repo_url_to_release_api(repo_url: str) -> str:
+    parsed = urlparse(normalize_repo_url(repo_url))
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+        raise ValueError("目前仅支持 GitHub 仓库地址")
+
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 2:
+        raise ValueError("仓库地址格式不正确")
+
+    owner, repo = parts[0], parts[1]
+    return f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+
+
+def build_github_raw_candidates(repo_url: str) -> list:
+    parsed = urlparse(normalize_repo_url(repo_url))
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"} or len(parts) < 2:
+        return []
+
+    owner, repo = parts[0], parts[1]
+    raw_prefix = f"https://raw.githubusercontent.com/{owner}/{repo}"
+    return [
+        f"{raw_prefix}/main/management.html",
+        f"{raw_prefix}/master/management.html",
+        f"{raw_prefix}/main/dist/management.html",
+        f"{raw_prefix}/master/dist/management.html",
+        f"{raw_prefix}/main/public/management.html",
+        f"{raw_prefix}/master/public/management.html",
+    ]
+
+
+def read_yaml_config() -> Tuple[dict, Optional[str]]:
+    if not CONFIG_YAML_PATH or not CONFIG_YAML_PATH.exists():
+        return {}, None
+
+    try:
+        with open(CONFIG_YAML_PATH, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}, str(CONFIG_YAML_PATH)
+    except Exception as exc:
+        raise RuntimeError(f"读取 config.yaml 失败: {exc}") from exc
+
+
+def write_yaml_config(data: dict) -> Optional[str]:
+    if not CONFIG_YAML_PATH:
+        return None
+
+    with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    return str(CONFIG_YAML_PATH)
+
+
+def load_remote_panel_settings() -> dict:
+    settings = dict(REMOTE_PANEL_DEFAULTS)
+    settings.update(load_json_file(REMOTE_PANEL_SETTINGS_FILE, {}))
+
+    config_data, config_path = read_yaml_config()
+    remote_cfg = config_data.get("remote-management") if isinstance(config_data, dict) else {}
+    if isinstance(remote_cfg, dict):
+        settings["allow_remote_management"] = bool(remote_cfg.get("allow-remote-management", settings["allow_remote_management"]))
+        settings["disable_control_panel"] = bool(remote_cfg.get("disable-control-panel", settings["disable_control_panel"]))
+        settings["secret_key"] = str(remote_cfg.get("secret-key", settings["secret_key"]) or "")
+        settings["panel_repo_url"] = normalize_repo_url(remote_cfg.get("panel-github-repository", settings["panel_repo_url"]))
+
+    settings["panel_repo_url"] = normalize_repo_url(settings.get("panel_repo_url"))
+    settings["config_path"] = config_path
+    settings["config_available"] = bool(config_path)
+    return settings
+
+
+def save_remote_panel_settings(payload: dict) -> dict:
+    settings = {
+        "allow_remote_management": bool(payload.get("allow_remote_management")),
+        "disable_control_panel": bool(payload.get("disable_control_panel")),
+        "secret_key": str(payload.get("secret_key", "") or "").strip(),
+        "panel_repo_url": normalize_repo_url(payload.get("panel_repo_url", DEFAULT_PANEL_REPO_URL)),
+    }
+
+    ensure_remote_panel_dir()
+    save_json_file(REMOTE_PANEL_SETTINGS_FILE, settings)
+
+    config_path = None
+    if CONFIG_YAML_PATH and CONFIG_YAML_PATH.exists():
+        config_data, config_path = read_yaml_config()
+        remote_cfg = dict(config_data.get("remote-management") or {})
+        remote_cfg["allow-remote-management"] = settings["allow_remote_management"]
+        remote_cfg["disable-control-panel"] = settings["disable_control_panel"]
+        remote_cfg["panel-github-repository"] = settings["panel_repo_url"]
+        if settings["secret_key"]:
+            remote_cfg["secret-key"] = settings["secret_key"]
+        else:
+            remote_cfg.pop("secret-key", None)
+        config_data["remote-management"] = remote_cfg
+        config_path = write_yaml_config(config_data)
+
+    settings["config_path"] = config_path
+    settings["config_available"] = bool(config_path)
+    return settings
+
+
+def load_remote_panel_state() -> dict:
+    state = load_json_file(REMOTE_PANEL_STATE_FILE, {})
+    if REMOTE_PANEL_HTML.exists():
+        state.setdefault("downloaded", True)
+        state.setdefault("html_path", str(REMOTE_PANEL_HTML))
+        state.setdefault("size", REMOTE_PANEL_HTML.stat().st_size)
+    else:
+        state["downloaded"] = False
+    return state
+
+
+def get_remote_panel_info() -> dict:
+    settings = load_remote_panel_settings()
+    state = load_remote_panel_state()
+    panel_url = "/panel/management.html" if REMOTE_PANEL_HTML.exists() else ""
+    service_panel_url = f"{MANAGEMENT_API_URL.rstrip('/')}/management.html"
+    try:
+        release_api_url = repo_url_to_release_api(settings["panel_repo_url"])
+    except Exception:
+        release_api_url = ""
+
+    return {
+        **settings,
+        "panel_url": panel_url,
+        "service_panel_url": service_panel_url,
+        "release_api_url": release_api_url,
+        "panel_downloaded": bool(state.get("downloaded")),
+        "last_sync": state.get("last_sync"),
+        "last_error": state.get("last_error", ""),
+        "release_tag": state.get("release_tag", ""),
+        "asset_url": state.get("asset_url", ""),
+        "html_path": state.get("html_path", str(REMOTE_PANEL_HTML)),
+        "html_size": state.get("size", REMOTE_PANEL_HTML.stat().st_size if REMOTE_PANEL_HTML.exists() else 0),
+    }
+
+
+def download_remote_panel_html(repo_url: str) -> dict:
+    normalized_repo_url = normalize_repo_url(repo_url)
+    ensure_remote_panel_dir()
+
+    html_bytes = None
+    asset_url = ""
+    release_tag = ""
+    release_name = ""
+    release_api_url = ""
+    asset_name = "management.html"
+
+    if normalized_repo_url.lower().endswith(".html"):
+        html_resp = requests.get(
+            normalized_repo_url,
+            headers={"User-Agent": GITHUB_API_HEADERS["User-Agent"]},
+            timeout=REMOTE_PROXY_TIMEOUT,
+            proxies=NO_PROXY,
+        )
+        html_resp.raise_for_status()
+        html_bytes = html_resp.content
+        asset_url = normalized_repo_url
+    else:
+        try:
+            release_api_url = repo_url_to_release_api(normalized_repo_url)
+        except Exception:
+            release_api_url = ""
+
+        if release_api_url:
+            release_resp = requests.get(
+                release_api_url,
+                headers=GITHUB_API_HEADERS,
+                timeout=REMOTE_PROXY_TIMEOUT,
+                proxies=NO_PROXY,
+            )
+            if release_resp.ok:
+                release = release_resp.json()
+                asset = next((item for item in release.get("assets", []) if item.get("name") == "management.html"), None)
+                if asset and asset.get("browser_download_url"):
+                    html_resp = requests.get(
+                        asset["browser_download_url"],
+                        headers={"User-Agent": GITHUB_API_HEADERS["User-Agent"]},
+                        timeout=REMOTE_PROXY_TIMEOUT,
+                        proxies=NO_PROXY,
+                    )
+                    html_resp.raise_for_status()
+                    html_bytes = html_resp.content
+                    asset_url = asset["browser_download_url"]
+                    release_tag = release.get("tag_name", "")
+                    release_name = release.get("name", "")
+                    asset_name = asset.get("name", "management.html")
+
+                    digest = asset.get("digest") or ""
+                    if digest.startswith("sha256:"):
+                        actual = hashlib.sha256(html_bytes).hexdigest()
+                        expected = digest.split(":", 1)[1].lower()
+                        if actual.lower() != expected:
+                            raise RuntimeError("management.html 校验失败，下载内容与 release digest 不一致")
+
+        if html_bytes is None:
+            last_error = None
+            for candidate_url in build_github_raw_candidates(normalized_repo_url):
+                try:
+                    html_resp = requests.get(
+                        candidate_url,
+                        headers={"User-Agent": GITHUB_API_HEADERS["User-Agent"]},
+                        timeout=REMOTE_PROXY_TIMEOUT,
+                        proxies=NO_PROXY,
+                    )
+                    if html_resp.ok:
+                        html_bytes = html_resp.content
+                        asset_url = candidate_url
+                        break
+                    last_error = RuntimeError(f"{candidate_url} -> {html_resp.status_code}")
+                except Exception as exc:
+                    last_error = exc
+
+            if html_bytes is None:
+                if release_api_url:
+                    raise RuntimeError(f"没有找到可用的 management.html，已尝试 release 和仓库常见路径: {last_error}")
+                raise RuntimeError("请输入 GitHub 仓库地址或直接填写 management.html 地址")
+
+    with open(REMOTE_PANEL_HTML, "wb") as f:
+        f.write(html_bytes)
+
+    state = {
+        "downloaded": True,
+        "last_sync": utc_now_iso(),
+        "release_tag": release_tag,
+        "release_name": release_name,
+        "asset_name": asset_name,
+        "asset_url": asset_url,
+        "release_api_url": release_api_url,
+        "repo_url": normalized_repo_url,
+        "html_path": str(REMOTE_PANEL_HTML),
+        "size": len(html_bytes),
+        "last_error": "",
+    }
+    save_json_file(REMOTE_PANEL_STATE_FILE, state)
+    return state
+
+
+def record_remote_panel_error(repo_url: str, error: Exception):
+    state = load_remote_panel_state()
+    state.update({
+        "downloaded": REMOTE_PANEL_HTML.exists(),
+        "last_sync": utc_now_iso(),
+        "repo_url": normalize_repo_url(repo_url),
+        "last_error": str(error),
+    })
+    if REMOTE_PANEL_HTML.exists():
+        state["html_path"] = str(REMOTE_PANEL_HTML)
+        state["size"] = REMOTE_PANEL_HTML.stat().st_size
+    save_json_file(REMOTE_PANEL_STATE_FILE, state)
+
+
+def build_proxy_headers() -> dict:
+    headers = {}
+    for key, value in request.headers.items():
+        key_lower = key.lower()
+        if key_lower in HOP_BY_HOP_HEADERS or key_lower == "host":
+            continue
+        if key_lower == "accept-encoding":
+            continue
+        headers[key] = value
+    if MANAGEMENT_API_KEY and "Authorization" not in headers:
+        headers["Authorization"] = f"Bearer {MANAGEMENT_API_KEY}"
+    return headers
+
+
+def proxy_to_management_api(path: str = "", include_management_prefix: bool = True):
+    base = MANAGEMENT_API_URL.rstrip("/")
+    target = f"{base}/v0/management"
+    if not include_management_prefix:
+        target = base
+    if path:
+        target = f"{target}/{path.lstrip('/')}"
+
+    upstream = requests.request(
+        method=request.method,
+        url=target,
+        params=request.args,
+        headers=build_proxy_headers(),
+        data=request.get_data(),
+        timeout=REMOTE_PROXY_TIMEOUT,
+        proxies=NO_PROXY,
+        allow_redirects=False,
+    )
+
+    response = Response(upstream.content, status=upstream.status_code)
+    for key, value in upstream.headers.items():
+        if key.lower() in HOP_BY_HOP_HEADERS:
+            continue
+        response.headers[key] = value
+    return response
 
 
 def load_quota_cache() -> dict:
@@ -243,6 +611,91 @@ def get_tier_display(tier: str) -> dict:
 def index():
     """主页面"""
     return render_template("index.html")
+
+
+@app.route("/panel/management.html")
+def remote_panel_html():
+    if not REMOTE_PANEL_HTML.exists():
+        return jsonify({"error": "尚未同步 UI，请先在远程管理页保存并更新 UI"}), 404
+
+    with open(REMOTE_PANEL_HTML, "rb") as f:
+        html_bytes = f.read()
+    return Response(html_bytes, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/api/remote-panel")
+def api_remote_panel():
+    try:
+        return jsonify(get_remote_panel_info())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/remote-panel", methods=["POST"])
+def api_save_remote_panel():
+    payload = request.get_json(silent=True) or {}
+    sync_panel = bool(payload.get("sync_panel"))
+
+    try:
+        settings = save_remote_panel_settings(payload)
+        result = get_remote_panel_info()
+
+        if sync_panel:
+            try:
+                state = download_remote_panel_html(settings["panel_repo_url"])
+                result.update({
+                    "panel_downloaded": True,
+                    "last_sync": state.get("last_sync"),
+                    "release_tag": state.get("release_tag", ""),
+                    "asset_url": state.get("asset_url", ""),
+                    "last_error": "",
+                })
+            except Exception as sync_error:
+                record_remote_panel_error(settings["panel_repo_url"], sync_error)
+                result = get_remote_panel_info()
+                result["sync_error"] = str(sync_error)
+
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/remote-panel/sync", methods=["POST"])
+def api_sync_remote_panel():
+    payload = request.get_json(silent=True) or {}
+    repo_url = normalize_repo_url(payload.get("panel_repo_url") or load_remote_panel_settings()["panel_repo_url"])
+
+    try:
+        state = download_remote_panel_html(repo_url)
+        info = get_remote_panel_info()
+        info.update({
+            "panel_downloaded": True,
+            "last_sync": state.get("last_sync"),
+            "release_tag": state.get("release_tag", ""),
+            "asset_url": state.get("asset_url", ""),
+            "last_error": "",
+        })
+        return jsonify(info)
+    except Exception as exc:
+        record_remote_panel_error(repo_url, exc)
+        return jsonify({"error": str(exc), **get_remote_panel_info()}), 500
+
+
+@app.route("/v0/management", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@app.route("/v0/management/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def proxy_management_routes(subpath: str):
+    try:
+        return proxy_to_management_api(subpath, include_management_prefix=True)
+    except Exception as exc:
+        return jsonify({"error": f"代理 Management API 失败: {exc}"}), 502
+
+
+@app.route("/v1/models", methods=["GET"])
+def proxy_models_route():
+    try:
+        return proxy_to_management_api("v1/models", include_management_prefix=False)
+    except Exception as exc:
+        return jsonify({"error": f"代理 /v1/models 失败: {exc}"}), 502
 
 
 @app.route("/api/accounts")
