@@ -1481,7 +1481,7 @@
                 </button>
                 <button class="nav-tab" data-page="remote">
                     <span class="icon">UI</span>
-                    Remote UI
+                    远程面板
                 </button>
                 <button class="nav-tab" data-page="usage">
                     <span class="icon">📖</span>
@@ -1678,69 +1678,80 @@
                 <div class="panel-header">
                     <div class="panel-title">
                         <span class="icon">UI</span>
-                        Remote UI Source
+                        远程面板源
                     </div>
                     <button class="btn btn-ghost btn-sm" onclick="loadRemotePanelConfig()">
-                        <span>R</span> Refresh
+                        <span>R</span> 刷新
                     </button>
                 </div>
                 <div class="panel-body">
                     <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
-                        Enter a UI repository URL or a direct <code>management.html</code> URL. After saving, this panel will pull the UI and switch to the new page.
+                        填入 GitHub 仓库地址，或直接填 <code>management.html</code> 文件地址。保存后会拉取新面板，并通过本地 <code>/management.html</code> 提供出来。
                     </p>
                     <div class="remote-grid">
                         <label class="remote-field remote-field-full">
-                            <span class="remote-label">UI Repository</span>
+                            <span class="remote-label">面板仓库</span>
                             <input id="remotePanelRepoUrl" class="remote-input" type="text" placeholder="https://github.com/your-org/your-ui-repo">
                         </label>
                         <label class="remote-toggle-card">
                             <div>
-                                <div class="remote-label">Allow Remote Management</div>
-                                <div class="remote-help">Sync to config.yaml when available.</div>
+                                <div class="remote-label">允许远程访问</div>
+                                <div class="remote-help">找到 config.yaml 时会同步写入。</div>
                             </div>
                             <input id="remoteAllowAccess" type="checkbox">
                         </label>
                         <label class="remote-toggle-card">
                             <div>
-                                <div class="remote-label">Disable Built-in Panel</div>
-                                <div class="remote-help">Keep only the pulled UI entry.</div>
+                                <div class="remote-label">禁用内置面板</div>
+                                <div class="remote-help">仅保留拉取后的新面板入口。</div>
                             </div>
                             <input id="remoteDisablePanel" type="checkbox">
                         </label>
                         <label class="remote-field">
-                            <span class="remote-label">Secret Key</span>
-                            <input id="remoteSecretKey" class="remote-input" type="password" placeholder="Optional">
+                            <span class="remote-label">管理密钥</span>
+                            <input id="remoteSecretKey" class="remote-input" type="password" placeholder="可选">
                         </label>
                         <div class="remote-field">
-                            <span class="remote-label">Panel URL</span>
+                            <span class="remote-label">当前入口</span>
                             <div class="remote-output" id="remotePanelUrl">-</div>
                         </div>
                         <div class="remote-field">
-                            <span class="remote-label">Last Sync</span>
+                            <span class="remote-label">最近同步</span>
                             <div class="remote-output" id="remoteLastSync">-</div>
                         </div>
                         <div class="remote-field">
-                            <span class="remote-label">Release Tag</span>
+                            <span class="remote-label">来源类型</span>
+                            <div class="remote-output" id="remoteSourceType">-</div>
+                        </div>
+                        <div class="remote-field">
+                            <span class="remote-label">版本标签</span>
                             <div class="remote-output" id="remoteReleaseTag">-</div>
                         </div>
                         <div class="remote-field remote-field-full">
-                            <span class="remote-label">Status</span>
-                            <div class="remote-output" id="remoteStatusText">Not synced yet.</div>
+                            <span class="remote-label">状态</span>
+                            <div class="remote-output" id="remoteStatusText">还没有同步面板。</div>
                         </div>
                         <div class="remote-field remote-field-full">
-                            <span class="remote-label">Config Path</span>
+                            <span class="remote-label">配置文件</span>
                             <div class="remote-output" id="remoteConfigPath">-</div>
                         </div>
+                        <label class="remote-toggle-card remote-field-full">
+                            <div>
+                                <div class="remote-label">同步后自动打开</div>
+                                <div class="remote-help">拉取成功后自动跳转到本地 <code>/management.html</code>。</div>
+                            </div>
+                            <input id="remoteAutoOpen" type="checkbox" checked>
+                        </label>
                     </div>
                     <div class="control-buttons" style="margin-top: 1rem;">
                         <button class="btn btn-primary btn-lg" id="saveRemotePanelBtn" onclick="saveRemotePanelConfig(true)">
-                            <span>UI</span> Save And Update UI
+                            <span>UI</span> 保存并更新
                         </button>
                         <button class="btn btn-secondary btn-lg" id="syncRemotePanelBtn" onclick="syncRemotePanel()">
-                            <span>R</span> Pull UI Again
+                            <span>R</span> 重新拉取
                         </button>
                         <button class="btn btn-success btn-lg" id="openRemotePanelBtn" onclick="openRemotePanel()" disabled>
-                            <span>Go</span> Open Current UI
+                            <span>Go</span> 打开当前面板
                         </button>
                     </div>
                 </div>
@@ -2303,26 +2314,51 @@
             document.getElementById('remoteAllowAccess').checked = !!data.allow_remote_management;
             document.getElementById('remoteDisablePanel').checked = !!data.disable_control_panel;
             document.getElementById('remoteSecretKey').value = data.secret_key || '';
-            document.getElementById('remotePanelUrl').textContent = data.panel_url || data.service_panel_url || '-';
+            document.getElementById('remotePanelUrl').textContent = data.active_panel_url || data.panel_url || data.service_panel_url || '-';
             document.getElementById('remoteLastSync').textContent = data.last_sync || '-';
             document.getElementById('remoteReleaseTag').textContent = data.release_tag || '-';
-            document.getElementById('remoteConfigPath').textContent = data.config_path || 'config.yaml not found, saved locally only';
+            document.getElementById('remoteSourceType').textContent = formatRemoteSourceType(data.source_type);
+            document.getElementById('remoteConfigPath').textContent = data.config_path || '未找到 config.yaml，目前仅保存到本地';
 
             const statusParts = [];
-            statusParts.push(data.panel_downloaded ? 'UI ready' : 'UI not synced yet');
+            statusParts.push(data.panel_downloaded ? '面板已就绪' : '还没有同步面板');
             if (data.last_error) {
                 statusParts.push(data.last_error);
             } else if (data.asset_url) {
                 statusParts.push(data.asset_url);
             }
             document.getElementById('remoteStatusText').textContent = statusParts.join(' | ');
-            document.getElementById('openRemotePanelBtn').disabled = !data.panel_url;
+            document.getElementById('openRemotePanelBtn').disabled = !(data.active_panel_url || data.panel_url);
+        }
+
+        function formatRemoteSourceType(sourceType) {
+            const mapping = {
+                'github-release': 'GitHub Release',
+                'github-raw': 'GitHub Raw',
+                'direct-html': '直接 HTML'
+            };
+            return mapping[sourceType] || '-';
+        }
+
+        function shouldAutoOpenRemotePanel() {
+            return !!document.getElementById('remoteAutoOpen')?.checked;
+        }
+
+        function redirectToManagedPanel(newTab = false) {
+            const target = remotePanelInfo?.active_panel_url || remotePanelInfo?.panel_url || '';
+            if (!target) return;
+            const withTs = `${target}${target.includes('?') ? '&' : '?'}t=${Date.now()}`;
+            if (newTab) {
+                window.open(withTs, '_blank', 'noopener');
+            } else {
+                window.location.href = withTs;
+            }
         }
 
         async function saveRemotePanelConfig(syncPanel = true) {
             const btn = document.getElementById('saveRemotePanelBtn');
             btn.disabled = true;
-            btn.innerHTML = '<span>...</span> Saving...';
+            btn.innerHTML = '<span>...</span> 保存中...';
 
             try {
                 const resp = await fetch('/api/remote-panel', {
@@ -2346,19 +2382,22 @@
                 if (data.sync_error) {
                     throw new Error(data.sync_error);
                 }
-                showToast(syncPanel ? 'UI 仓库已保存并更新' : 'Remote UI 配置已保存', 'success');
+                showToast(syncPanel ? '面板仓库已保存并更新' : '远程面板配置已保存', 'success');
+                if (syncPanel && shouldAutoOpenRemotePanel()) {
+                    setTimeout(() => redirectToManagedPanel(false), 300);
+                }
             } catch (error) {
-                showToast('保存 Remote UI 失败: ' + error.message, 'error');
+                showToast('保存远程面板失败: ' + error.message, 'error');
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = '<span>UI</span> Save And Update UI';
+                btn.innerHTML = '<span>UI</span> 保存并更新';
             }
         }
 
         async function syncRemotePanel() {
             const btn = document.getElementById('syncRemotePanelBtn');
             btn.disabled = true;
-            btn.innerHTML = '<span>...</span> Pulling...';
+            btn.innerHTML = '<span>...</span> 拉取中...';
 
             try {
                 const resp = await fetch('/api/remote-panel/sync', {
@@ -2375,22 +2414,25 @@
                 if (!resp.ok || data.error) {
                     throw new Error(data.error || 'Pull failed');
                 }
-                showToast('Remote UI 已更新', 'success');
+                showToast('远程面板已更新', 'success');
+                if (shouldAutoOpenRemotePanel()) {
+                    setTimeout(() => redirectToManagedPanel(false), 300);
+                }
             } catch (error) {
-                showToast('拉取 Remote UI 失败: ' + error.message, 'error');
+                showToast('拉取远程面板失败: ' + error.message, 'error');
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = '<span>馃攧</span> Pull UI Again';
+                btn.innerHTML = '<span>R</span> 重新拉取';
             }
         }
 
         function openRemotePanel() {
-            const target = remotePanelInfo?.panel_url || '';
+            const target = remotePanelInfo?.active_panel_url || remotePanelInfo?.panel_url || '';
             if (!target) {
-                showToast('还没有可打开的 UI，请先保存并更新', 'error');
+                showToast('还没有可打开的面板，请先保存并更新', 'error');
                 return;
             }
-            window.open(target, '_blank', 'noopener');
+            redirectToManagedPanel(true);
         }
 
         // ==================== Accounts ====================

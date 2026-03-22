@@ -269,6 +269,7 @@ def get_remote_panel_info() -> dict:
     settings = load_remote_panel_settings()
     state = load_remote_panel_state()
     panel_url = "/panel/management.html" if REMOTE_PANEL_HTML.exists() else ""
+    active_panel_url = "/management.html" if REMOTE_PANEL_HTML.exists() else ""
     service_panel_url = f"{MANAGEMENT_API_URL.rstrip('/')}/management.html"
     try:
         release_api_url = repo_url_to_release_api(settings["panel_repo_url"])
@@ -278,6 +279,7 @@ def get_remote_panel_info() -> dict:
     return {
         **settings,
         "panel_url": panel_url,
+        "active_panel_url": active_panel_url,
         "service_panel_url": service_panel_url,
         "release_api_url": release_api_url,
         "panel_downloaded": bool(state.get("downloaded")),
@@ -285,6 +287,7 @@ def get_remote_panel_info() -> dict:
         "last_error": state.get("last_error", ""),
         "release_tag": state.get("release_tag", ""),
         "asset_url": state.get("asset_url", ""),
+        "source_type": state.get("source_type", ""),
         "html_path": state.get("html_path", str(REMOTE_PANEL_HTML)),
         "html_size": state.get("size", REMOTE_PANEL_HTML.stat().st_size if REMOTE_PANEL_HTML.exists() else 0),
     }
@@ -300,6 +303,7 @@ def download_remote_panel_html(repo_url: str) -> dict:
     release_name = ""
     release_api_url = ""
     asset_name = "management.html"
+    source_type = ""
 
     if normalized_repo_url.lower().endswith(".html"):
         html_resp = requests.get(
@@ -311,6 +315,7 @@ def download_remote_panel_html(repo_url: str) -> dict:
         html_resp.raise_for_status()
         html_bytes = html_resp.content
         asset_url = normalized_repo_url
+        source_type = "direct-html"
     else:
         try:
             release_api_url = repo_url_to_release_api(normalized_repo_url)
@@ -340,6 +345,7 @@ def download_remote_panel_html(repo_url: str) -> dict:
                     release_tag = release.get("tag_name", "")
                     release_name = release.get("name", "")
                     asset_name = asset.get("name", "management.html")
+                    source_type = "github-release"
 
                     digest = asset.get("digest") or ""
                     if digest.startswith("sha256:"):
@@ -361,6 +367,7 @@ def download_remote_panel_html(repo_url: str) -> dict:
                     if html_resp.ok:
                         html_bytes = html_resp.content
                         asset_url = candidate_url
+                        source_type = "github-raw"
                         break
                     last_error = RuntimeError(f"{candidate_url} -> {html_resp.status_code}")
                 except Exception as exc:
@@ -383,6 +390,7 @@ def download_remote_panel_html(repo_url: str) -> dict:
         "asset_url": asset_url,
         "release_api_url": release_api_url,
         "repo_url": normalized_repo_url,
+        "source_type": source_type,
         "html_path": str(REMOTE_PANEL_HTML),
         "size": len(html_bytes),
         "last_error": "",
@@ -621,6 +629,11 @@ def remote_panel_html():
     with open(REMOTE_PANEL_HTML, "rb") as f:
         html_bytes = f.read()
     return Response(html_bytes, mimetype="text/html; charset=utf-8")
+
+
+@app.route("/management.html")
+def official_remote_panel_html():
+    return remote_panel_html()
 
 
 @app.route("/api/remote-panel")
